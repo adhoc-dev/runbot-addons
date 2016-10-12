@@ -10,6 +10,7 @@ This module allows you to generate runbot builds based on docker.
 Use .travis.yml file of your git repository to generate a Dockerfile after that
 start to build a image, run a container to test and re-run the same container with live instance.
 
+
 Installation
 ============
 
@@ -65,6 +66,7 @@ Contributors
 ------------
 
 * Moisés López <moylop260@vauxoo.com>
+* Juan José Scarafía <jjs@adhoc.com.ar>
 
 Maintainer
 ----------

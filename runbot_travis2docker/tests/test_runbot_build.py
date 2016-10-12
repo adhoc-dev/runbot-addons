@@ -7,10 +7,10 @@ import logging
 import os
 import time
 import xmlrpclib
-
+import subprocess
+import openerp
 from openerp.tests.common import TransactionCase
 
-from openerp.tools.misc import mute_logger
 
 _logger = logging.getLogger(__name__)
 
@@ -25,96 +25,172 @@ class TestRunbotJobs(TransactionCase):
         self.repo = self.repo_obj.search([
             ('is_travis2docker_build', '=', True)], limit=1)
         self.repo_domain = [('repo_id', '=', self.repo.id)]
-        self.cron = self.env.ref('runbot.repo_cron')
-        self.cron.write({'active': False})
-        self.build = None
 
-    def tearDown(self):
-        super(TestRunbotJobs, self).tearDown()
-        self.cron.write({'active': True})
-        _logger.info('job_10_test_base log' +
-                     open(os.path.join(self.build.path(), "logs",
-                                       "job_10_test_base.txt")).read())
-        _logger.info('job_20_test_all log' +
-                     open(os.path.join(self.build.path(), "logs",
-                                       "job_20_test_all.txt")).read())
+    def delete_build_path(self, build):
+        subprocess.check_output(['rm', '-rf', build.path()])
 
-    @mute_logger('openerp.addons.runbot.runbot')
+    def delete_image_cache(self, build):
+        cmd = ['docker', 'rmi', '-f', build.docker_image_cache]
+        res = -1
+        try:
+            res = subprocess.check_output(cmd)
+        except subprocess.CalledProcessError:
+            pass
+        return res
+
+    def delete_container(self, build):
+        cmd = ['docker', 'rm', '-f', build.get_docker_container()]
+        res = -1
+        try:
+            res = subprocess.check_output(cmd)
+        except subprocess.CalledProcessError:
+            pass
+        return res
+
+    @openerp.tools.mute_logger('openerp.addons.runbot.runbot')
     def wait_change_job(self, current_job, build,
-                        loops=36, timeout=10):
-        for loop in range(loops):
-            _logger.info("Repo Cron to wait change of state")
+                        loops=40, timeout=20):
+        _logger.info("Waiting change of current job: %s", current_job)
+        for count in range(loops):
             self.repo.cron()
             if build.job != current_job:
-                break
+                return build.job
             time.sleep(timeout)
-        return build.job
+            if divmod(count + 1, 5)[1] == 0:
+                _logger.info("...")
+        # The build don't changed of job.
+        return False
 
-    def test_jobs(self):
-        'Create build and run all jobs'
+    def check_registry_service(self):
+        pass
+
+    def test_10_jobs_branch(self):
+        "Create build and run all jobs in branch case (not pull request)"
+        global _logger  # pylint: disable=global-statement
+        _logger = logging.getLogger(__name__ + '.def test_10_jobs_branch')
+        self.run_jobs('refs/heads/fast-travis')
+
+    def test_20_jobs_pr(self):
+        "Create build and run all jobs in pull request"
+        global _logger  # pylint: disable=global-statement
+        _logger = logging.getLogger(__name__ + '.def test_20_jobs_pr')
+        self.run_jobs('refs/pull/1')
+
+    def run_jobs(self, branch):
+        self.assertTrue(
+            self.exists_container('registry', include_stop=False),
+            "A docker container registry is required. Try running: "
+            "'docker run -d -p 5000:5000 --name registry registry:2'")
         self.assertEqual(len(self.repo), 1, "Repo not found")
-        _logger.info("Repo update to get branches")
         self.repo.update()
+        self.repo.killall()
         branch = self.branch_obj.search(self.repo_domain + [
-            ('branch_name', '=', 'fast-travis-oca')], limit=1)
-        if not branch:
-            # If the branch has a commit too old then runbot ignore it
-            branch = self.branch_obj.create({
-                'repo_id': self.repo.id,
-                'name': 'refs/heads/fast-travis-oca',
-            })
+            ('name', '=', branch)], limit=1)
         self.assertEqual(len(branch), 1, "Branch not found")
         self.build_obj.search([('branch_id', '=', branch.id)]).unlink()
-        self.build_obj.create({'branch_id': branch.id, 'name': 'HEAD'})
-        # runbot module has a inherit in create method
-        # but a "return id" is missed. Then we need to search it.
-        # https://github.com/odoo/odoo-extra/blob/038fd3e/runbot/runbot.py#L599
-        self.build = self.build_obj.search([('branch_id', '=', branch.id)],
-                                           limit=1)
-        self.assertEqual(len(self.build) == 0, False, "Build not found")
 
-        if self.build.state == 'done' and self.build.result == 'skipped':
+        self.repo.update()
+        build = self.build_obj.search([
+            ('branch_id', '=', branch.id)], limit=1, order='id desc')
+        self.assertEqual(len(build) == 0, False, "Build not found")
+
+        if build.state == 'done' and build.result == 'skipped':
             # When the last commit of the repo is too old,
             # runbot will skip this build then we are forcing it
-            self.build.force()
+            build.force()
 
+        build.checkout()
+        self.delete_build_path(build)
         self.assertEqual(
-            self.build.state, u'pending', "State should be pending")
+            build.state, u'pending', "State should be pending")
 
-        _logger.info("Repo Cron to change state to pending -> testing")
         self.repo.cron()
         self.assertEqual(
-            self.build.state, u'testing', "State should be testing")
-        self.assertEqual(
-            self.build.job, u'job_10_test_base',
-            "Job should be job_10_test_base")
-        new_current_job = self.wait_change_job(self.build.job, self.build)
+            build.state, u'testing', "State should be testing")
+        images_result = subprocess.check_output(['docker', 'images'])
+        _logger.info(images_result)
+        containers_result = subprocess.check_output(['docker', 'ps'])
+        _logger.info(containers_result)
+        if not build.is_pull_request:
+            self.assertEqual(
+                build.job, u'job_10_test_base',
+                "Job should be job_10_test_base")
+            new_current_job = self.wait_change_job(build.job, build)
+            _logger.info(
+                open(os.path.join(build.path(), "logs",
+                                  "job_10_test_base.txt")).read())
+        else:
+            self.assertTrue(
+                self.docker_registry_test(build),
+                "Docker image don't found in registry to re-use in PR.",
+            )
+            new_current_job = u'job_20_test_all'
 
         self.assertEqual(
-            new_current_job, u'job_20_test_all',
-            "Job should be job_20_test_all")
-        new_current_job = self.wait_change_job(new_current_job, self.build)
-
+            new_current_job, u'job_20_test_all')
+        new_current_job = self.wait_change_job(new_current_job, build)
         self.assertEqual(
             new_current_job, u'job_30_run',
-            "Job should be job_30_run")
+            "Job should be job_30_run, found %s" % new_current_job)
+        _logger.info(open(
+            os.path.join(build.path(), "logs",
+                         "job_20_test_all.txt")).read())
+
         self.assertEqual(
-            self.build.state, u'running',
+            build.state, u'running',
             "Job state should be running")
 
-        user_ids = self.connection_test(self.build, 36, 10)
+        user_ids = self.connection_test(build, 36, 10)
+        _logger.info(open(
+            os.path.join(build.path(), "logs",
+                         "job_30_run.txt")).read())
+
         self.assertEqual(
-            self.build.state, u'running',
+            build.state, u'running',
             "Job state should be running still")
         self.assertEqual(
             len(user_ids) >= 1, True, "Failed connection test")
 
-        self.build.kill()
         self.assertEqual(
-            self.build.state, u'done', "Job state should be done")
+            build.result, u'ok', "Job result should be ok")
+        self.assertTrue(
+            self.exists_container(build.docker_container),
+            "Container dont't exists")
+        build.kill()
+        self.assertEqual(
+            build.state, u'done', "Job state should be done")
+        self.assertFalse(
+            self.exists_container(build.docker_container),
+            "Container don't deleted")
+        if not build.is_pull_request:
+            self.assertTrue(
+                self.docker_registry_test(build),
+                "Docker image don't found in registry.",
+            )
+            self.delete_image_cache(build)
+        # Runbot original module use cr.commit :(
+        # This explicit commit help us to avoid believe
+        # that we will have a rollback of the data
+        self.cr.commit()  # pylint: disable=invalid-commit
 
-        self.assertEqual(
-            self.build.result, u'ok', "Job result should be ok")
+    def exists_container(self, container_name, include_stop=True):
+        cmd = ['docker', 'ps']
+        if include_stop:
+            cmd.append('-a')
+        containers = subprocess.check_output(cmd)
+        if container_name in containers:
+            return True
+        return False
+
+    def docker_registry_test(self, build):
+        cmd = [
+            "curl", "--silent",
+            "localhost:5000/v2/"
+            "vauxoo-dev-runbot_branch_remote_name_grp_feature2/tags/list",
+        ]
+        tag_list_output = subprocess.check_output(cmd)
+        tag_build = build.docker_image_cache.split(':')[-1]
+        return tag_build in tag_list_output
 
     def connection_test(self, build, attempts=1, delay=0):
         username = "admin"

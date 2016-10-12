@@ -18,12 +18,13 @@
         "python": [
             'travis2docker',
         ],
-        'bin': [
+        "bin": [
             'docker',
         ],
     },
     "data": [
         "views/runbot_repo_view.xml",
+        "views/frontend.xml",
     ],
     "demo": [
         "demo/runbot_repo_demo.xml",

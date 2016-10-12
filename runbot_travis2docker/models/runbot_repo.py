@@ -9,5 +9,12 @@ from openerp import fields, models
 class RunbotRepo(models.Model):
     _inherit = "runbot.repo"
 
-    is_travis2docker_build = fields.Boolean('Travis to docker build')
+    is_travis2docker_build = fields.Boolean('Travis to docker build',
+                                            default=True)
     travis2docker_test_disable = fields.Boolean('Test Disable?')
+    use_docker_cache = fields.Boolean()
+    docker_registry_server = fields.Char(
+        help="Docker registry server to centralize all docker push cache "
+        "images and docker pull cache images. E.g. localhost:5000. "
+        "If is empty won't push it. "
+        "Don't Use this feature if you use just one runbot server.")
