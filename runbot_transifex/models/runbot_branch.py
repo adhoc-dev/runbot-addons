@@ -102,7 +102,7 @@ class RunbotBranch(models.Model):
                     if last_sync_date:
                         stats = transifex_api.resource_language_stats.get(project=tx_project, resource=tx_resource, language=tx_language)
                         last_translation_update = stats.last_translation_update and parser.isoparse(stats.last_translation_update).replace(tzinfo=None)
-                        if not last_translation_update or last_translation_update > last_sync_date:
+                        if not last_translation_update or last_translation_update < last_sync_date:
                             _logger.debug('Skiping %s as not updated since %s', tx_resource.slug, last_sync_date)
                             continue
                     url = transifex_api.ResourceTranslationsAsyncDownload.download(resource=tx_resource, language=tx_language)
